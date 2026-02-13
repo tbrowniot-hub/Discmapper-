@@ -68,19 +68,20 @@ python .\App\discmapper_unified_v03.py run
 - Make sure MakeMKV is installed, or set the correct path in both config files.
 
 
-## Automation-ready CLI flags
+## Automation-ready CLI commands
 
-- `--movies` run movies mode without opening GUI dashboard
-- `--tv` run TV mode without opening GUI dashboard
-- `--verbose` also print runtime log lines to console
+- `health`, `refresh-all`, `build-queue`, `run`
+- `movies`, `tv`, `dry-run`
+- `--yes` auto-confirms queue bootstrap prompts
+- `--verbose` also prints runtime log lines to console
 
 Examples:
 
 ```
-python .\App\discmapper_unified_v03.py --movies
-python .\App\discmapper_unified_v03.py --tv
-python .\App\discmapper_unified_v03.py --movies --tv
-python .\App\discmapper_unified_v03.py --movies --verbose
+python .\App\discmapper_unified_v03.py movies
+python .\App\discmapper_unified_v03.py tv
+python .\App\discmapper_unified_v03.py dry-run --yes
+python .\App\discmapper_unified_v03.py run --yes --verbose
 ```
 
 Each run writes a log file to `Logs/run_YYYYMMDD_HHMMSS.log`.

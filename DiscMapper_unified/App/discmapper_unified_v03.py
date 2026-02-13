@@ -163,6 +163,23 @@ def default_paths() -> Dict[str, Path]:
     }
 
 
+def ensure_runtime_dirs() -> None:
+    r = root_dir()
+    for d in [
+        r / "Data" / "Indexes",
+        r / "Data" / "Queues",
+        r / "Logs",
+        r / "Staging" / "Movies" / "1_Raw",
+        r / "Staging" / "Movies" / "2_Review",
+        r / "Staging" / "Movies" / "3_Ready",
+        r / "Staging" / "TV" / "1_Raw",
+        r / "Staging" / "TV" / "2_Review",
+        r / "Staging" / "TV" / "3_Ready",
+        r / "Staging" / "Unable_to_Read",
+    ]:
+        ensure_dir(d)
+
+
 def run_cmd(cmd: list[str]) -> int:
     # Keep cwd at App/ so relative tool paths work
     return subprocess.call(cmd, cwd=str(app_dir()))
@@ -176,6 +193,7 @@ def set_logger(logger: logging.Logger | None) -> None:
 def health_check() -> None:
     log_step(LOGGER, "health_check", starting=True)
     migrate_config_paths()
+    ensure_runtime_dirs()
     p = default_paths()
 
     problems = []
@@ -183,7 +201,7 @@ def health_check() -> None:
     if not p["clz_csv"].exists():
         problems.append(f"Missing CLZ export: {p['clz_csv']}")
     if not p["tv_manifest"].exists():
-        problems.append(f"Missing TV manifest: {p['tv_manifest']}")
+        print(f"[DiscMapper Unified] TV manifest not found at {p['tv_manifest']} (TV steps will be skipped).")
 
     if not p["movies_config"].exists():
         problems.append(f"Missing movies config: {p['movies_config']}")
@@ -216,6 +234,7 @@ def refresh_all() -> None:
     log_step(LOGGER, "refresh_all", starting=True)
     health_check()
     p = default_paths()
+    ensure_runtime_dirs()
     py = sys.executable
 
     rc1 = run_cmd([py, str(app_dir() / "discmapper_v02.py"), "--config", str(p["movies_config"]),
@@ -223,24 +242,28 @@ def refresh_all() -> None:
     if rc1 != 0:
         raise RuntimeError(f"Movies index refresh failed (exit {rc1}).")
 
-    rc2 = run_cmd([py, str(app_dir() / "discmapper_tv_v02.py"),
-                   "import-manifest", "--manifest", str(p["tv_manifest"]), "--out", str(p["tv_index"])])
-    if rc2 != 0:
-        raise RuntimeError(f"TV index refresh failed (exit {rc2}).")
+    if p["tv_manifest"].exists():
+        rc2 = run_cmd([py, str(app_dir() / "discmapper_tv_v02.py"),
+                       "import-manifest", "--manifest", str(p["tv_manifest"]), "--out", str(p["tv_index"])])
+        if rc2 != 0:
+            raise RuntimeError(f"TV index refresh failed (exit {rc2}).")
+    else:
+        print(f"[DiscMapper Unified] TV manifest missing ({p['tv_manifest']}). Skipping TV index refresh.")
     log_step(LOGGER, "refresh_all", starting=False)
 
 
 def build_unified_queue() -> None:
-    """
-    Reuse proven queue builders (Movies GUI then TV GUI).
-    """
+    """Build movies queue (required) and TV queue (optional)."""
     log_step(LOGGER, "build_unified_queue", starting=True)
     health_check()
     p = default_paths()
     py = sys.executable
+    ensure_runtime_dirs()
 
-    if not p["movies_index"].exists() or not p["tv_index"].exists():
-        raise FileNotFoundError("Indexes missing. Run Refresh All Indexes first.")
+    rc0 = run_cmd([py, str(app_dir() / "discmapper_v02.py"), "--config", str(p["movies_config"]),
+                   "import-clz", "--clz", str(p["clz_csv"]), "--out", str(p["movies_index"])])
+    if rc0 != 0:
+        raise RuntimeError(f"Movies index refresh failed (exit {rc0}).")
 
     rc1 = run_cmd([py, str(app_dir() / "discmapper_v02.py"), "--config", str(p["movies_config"]),
                    "queue", "--index", str(p["movies_index"]), "--out", str(p["movies_queue"])])
@@ -252,29 +275,55 @@ def build_unified_queue() -> None:
             "In the Movies queue window, click Save & Close (or just close the window — it auto-saves if items exist)."
         )
 
-    rc2 = run_cmd([py, str(app_dir() / "discmapper_tv_v02.py"),
-                   "queue-builder", "--index", str(p["tv_index"]), "--out", str(p["tv_queue"])])
-    if rc2 != 0:
-        raise RuntimeError(f"TV queue build failed (exit {rc2}).")
-    if not p["tv_queue"].exists():
-        raise FileNotFoundError(
-            f"TV queue was not created: {p['tv_queue']}.\n"
-            "In the TV queue window, click Save Queue."
-        )
+    if p["tv_manifest"].exists():
+        rc2 = run_cmd([py, str(app_dir() / "discmapper_tv_v02.py"),
+                       "import-manifest", "--manifest", str(p["tv_manifest"]), "--out", str(p["tv_index"])])
+        if rc2 != 0:
+            raise RuntimeError(f"TV index refresh failed (exit {rc2}).")
+        rc3 = run_cmd([py, str(app_dir() / "discmapper_tv_v02.py"),
+                       "queue-builder", "--index", str(p["tv_index"]), "--out", str(p["tv_queue"])])
+        if rc3 != 0:
+            raise RuntimeError(f"TV queue build failed (exit {rc3}).")
+        if not p["tv_queue"].exists():
+            raise FileNotFoundError(
+                f"TV queue was not created: {p['tv_queue']}.\n"
+                "In the TV queue window, click Save Queue."
+            )
+    else:
+        print(f"[DiscMapper Unified] TV manifest missing ({p['tv_manifest']}). Skipping TV queue build.")
     log_step(LOGGER, "build_unified_queue", starting=False)
 
 
-def run_movies_queue() -> int:
+def _should_autobuild(prompt: bool = True) -> bool:
+    if not prompt:
+        return False
+    try:
+        answer = input("Movies queue is missing. Build it now? [y/N]: ").strip().lower()
+    except EOFError:
+        return False
+    return answer in {"y", "yes"}
+
+
+def run_movies_queue(auto_build: bool = False, prompt: bool = True, dry_run: bool = False) -> int:
     log_step(LOGGER, "run_movies_queue", starting=True)
     health_check()
     p = default_paths()
     py = sys.executable
 
     if not p["movies_queue"].exists():
-        raise FileNotFoundError(f"Movies queue missing: {p['movies_queue']}")
+        print(f"[DiscMapper Unified] Movies queue missing: {p['movies_queue']}")
+        if auto_build or _should_autobuild(prompt=prompt):
+            build_unified_queue()
+        if not p["movies_queue"].exists():
+            raise FileNotFoundError(
+                f"Movies queue still missing: {p['movies_queue']}. Run 'build-queue' and save the queue window."
+            )
 
-    rc_movies = run_cmd([py, str(app_dir() / "discmapper_v02.py"), "--config", str(p["movies_config"]),
-                         "rip", "--queue", str(p["movies_queue"])])
+    cmd = [py, str(app_dir() / "discmapper_v02.py"), "--config", str(p["movies_config"]),
+           "rip", "--queue", str(p["movies_queue"])]
+    if dry_run:
+        cmd.append("--dry-run")
+    rc_movies = run_cmd(cmd)
     log_step(LOGGER, "run_movies_queue", starting=False)
     return rc_movies
 
@@ -285,6 +334,7 @@ def run_tv_queue() -> int:
     p = default_paths()
     py = sys.executable
 
+    ensure_runtime_dirs()
     if not p["tv_queue"].exists():
         raise FileNotFoundError(f"TV queue missing: {p['tv_queue']}")
     if not p["tv_index"].exists():
@@ -297,7 +347,7 @@ def run_tv_queue() -> int:
     return rc_tv
 
 
-def run_unified_queue() -> int:
+def run_unified_queue(auto_build: bool = False, prompt: bool = True) -> int:
     """
     Bulletproof run:
     - Movies first, then TV.
@@ -308,18 +358,23 @@ def run_unified_queue() -> int:
     p = default_paths()
     py = sys.executable
 
+    ensure_runtime_dirs()
     if not p["movies_queue"].exists():
-        raise FileNotFoundError(f"Movies queue missing: {p['movies_queue']}")
-    if not p["tv_queue"].exists():
-        raise FileNotFoundError(f"TV queue missing: {p['tv_queue']}")
-    if not p["tv_index"].exists():
-        raise FileNotFoundError(f"TV index missing: {p['tv_index']}")
+        print(f"[DiscMapper Unified] Movies queue missing: {p['movies_queue']}")
+        if auto_build or _should_autobuild(prompt=prompt):
+            build_unified_queue()
+        if not p["movies_queue"].exists():
+            raise FileNotFoundError(f"Movies queue missing: {p['movies_queue']}. Run build-queue first.")
 
     rc_movies = run_cmd([py, str(app_dir() / "discmapper_v02.py"), "--config", str(p["movies_config"]),
                          "rip", "--queue", str(p["movies_queue"])])
-    rc_tv = run_cmd([py, str(app_dir() / "discmapper_tv_v02.py"),
-                     "rip-queue", "--index", str(p["tv_index"]), "--queue", str(p["tv_queue"]),
-                     "--config", str(p["tv_config"])])
+    rc_tv = 0
+    if p["tv_queue"].exists() and p["tv_index"].exists():
+        rc_tv = run_cmd([py, str(app_dir() / "discmapper_tv_v02.py"),
+                         "rip-queue", "--index", str(p["tv_index"]), "--queue", str(p["tv_queue"]),
+                         "--config", str(p["tv_config"])])
+    else:
+        print("[DiscMapper Unified] TV queue/index missing. Skipping TV run.")
 
     if rc_movies != 0:
         log_step(LOGGER, "run_unified_queue", starting=False)
@@ -403,16 +458,15 @@ def gui() -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(prog="discmapper_unified_v03")
-    ap.add_argument("cmd", nargs="?", default=None, choices=["gui", "health", "refresh-all", "build-queue", "run"])
-    ap.add_argument("--movies", action="store_true", help="Run movies mode without opening the interactive dashboard")
-    ap.add_argument("--tv", action="store_true", help="Run TV mode without opening the interactive dashboard")
+    ap.add_argument("cmd", nargs="?", default="gui", choices=["gui", "health", "refresh-all", "build-queue", "run", "movies", "tv", "dry-run"])
+    ap.add_argument("--yes", action="store_true", help="Auto-confirm prompts such as building a missing queue")
     ap.add_argument("--verbose", action="store_true", help="Print log messages to stdout in addition to writing run logs")
     args = ap.parse_args()
 
     mode = "unified"
-    if args.movies and not args.tv:
+    if args.cmd in {"movies", "dry-run"}:
         mode = "movies"
-    elif args.tv and not args.movies:
+    elif args.cmd == "tv":
         mode = "tv"
 
     p = default_paths()
@@ -425,14 +479,7 @@ def main() -> None:
 
     set_logger(init_run_logger("discmapper_unified_v03", mode=mode, config_used=config_used, verbose=args.verbose))
 
-    if args.movies or args.tv:
-        if args.movies and args.tv:
-            raise SystemExit(run_unified_queue())
-        if args.movies:
-            raise SystemExit(run_movies_queue())
-        raise SystemExit(run_tv_queue())
-
-    if args.cmd in (None, "gui"):
+    if args.cmd == "gui":
         gui()
     elif args.cmd == "health":
         health_check()
@@ -441,7 +488,13 @@ def main() -> None:
     elif args.cmd == "build-queue":
         build_unified_queue()
     elif args.cmd == "run":
-        raise SystemExit(run_unified_queue())
+        raise SystemExit(run_unified_queue(auto_build=args.yes, prompt=not args.yes))
+    elif args.cmd == "movies":
+        raise SystemExit(run_movies_queue(auto_build=args.yes, prompt=not args.yes))
+    elif args.cmd == "tv":
+        raise SystemExit(run_tv_queue())
+    elif args.cmd == "dry-run":
+        raise SystemExit(run_movies_queue(auto_build=args.yes, prompt=not args.yes, dry_run=True))
 
 
 if __name__ == "__main__":
