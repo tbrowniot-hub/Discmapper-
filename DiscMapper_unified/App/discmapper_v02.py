@@ -37,6 +37,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
+from logging_helper import init_run_logger, log_step
+
 IMDB_RE = re.compile(r"(tt\d{5,10})", re.IGNORECASE)
 ILLEGAL_WIN_CHARS = r'<>:"/\\|?*'
 
@@ -927,7 +929,11 @@ def main() -> None:
     p3.set_defaults(func=cmd_rip)
 
     args = ap.parse_args()
+    config_used = args.config or str(Path(__file__).with_name("config.json"))
+    logger = init_run_logger("discmapper_v02", mode="movies", config_used=config_used)
+    log_step(logger, f"command:{args.cmd}", starting=True)
     args.func(args)
+    log_step(logger, f"command:{args.cmd}", starting=False)
 
 if __name__ == "__main__":
     main()

@@ -28,6 +28,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.request import Request, urlopen
 
+from logging_helper import init_run_logger, log_step
+
 TVMAZE_ROOT = "https://api.tvmaze.com"
 TITLE_NUM_RE = re.compile(r"(?:title|t)(\d{1,3})", re.IGNORECASE)
 
@@ -882,7 +884,10 @@ def main() -> None:
     c.set_defaults(func=cmd_rip_queue)
 
     args = p.parse_args()
+    logger = init_run_logger("discmapper_tv_v02", mode="tv", config_used=args.config)
+    log_step(logger, f"command:{args.cmd}", starting=True)
     args.func(args)
+    log_step(logger, f"command:{args.cmd}", starting=False)
 
 if __name__ == "__main__":
     main()
