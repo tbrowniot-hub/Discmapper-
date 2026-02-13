@@ -20,6 +20,7 @@ DiscMapper_UNIFIED_v03/
   Data/
     Indexes/
     Queues/
+  Logs/
   Staging/
     Movies/1_Raw  Movies/2_Review  Movies/3_Ready
     TV/1_Raw      TV/2_Review      TV/3_Ready
@@ -65,3 +66,21 @@ python .\App\discmapper_unified_v03.py run
 ## Notes
 - Make sure `ffprobe` is available in PATH (install FFmpeg), or set `ffprobe_path` in `App\config_tv.json`.
 - Make sure MakeMKV is installed, or set the correct path in both config files.
+
+
+## Automation-ready CLI flags
+
+- `--movies` run movies mode without opening GUI dashboard
+- `--tv` run TV mode without opening GUI dashboard
+- `--verbose` also print runtime log lines to console
+
+Examples:
+
+```
+python .\App\discmapper_unified_v03.py --movies
+python .\App\discmapper_unified_v03.py --tv
+python .\App\discmapper_unified_v03.py --movies --tv
+python .\App\discmapper_unified_v03.py --movies --verbose
+```
+
+Each run writes a log file to `Logs/run_YYYYMMDD_HHMMSS.log`.

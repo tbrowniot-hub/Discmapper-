@@ -41,12 +41,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Dict, Any
+
+from logging_helper import init_run_logger, log_step
+
+
+LOGGER: logging.Logger | None = None
 
 
 def app_dir() -> Path:
@@ -162,7 +168,13 @@ def run_cmd(cmd: list[str]) -> int:
     return subprocess.call(cmd, cwd=str(app_dir()))
 
 
+def set_logger(logger: logging.Logger | None) -> None:
+    global LOGGER
+    LOGGER = logger
+
+
 def health_check() -> None:
+    log_step(LOGGER, "health_check", starting=True)
     migrate_config_paths()
     p = default_paths()
 
@@ -197,9 +209,11 @@ def health_check() -> None:
 
     if problems:
         raise RuntimeError("Health check failed:\n- " + "\n- ".join(problems))
+    log_step(LOGGER, "health_check", starting=False)
 
 
 def refresh_all() -> None:
+    log_step(LOGGER, "refresh_all", starting=True)
     health_check()
     p = default_paths()
     py = sys.executable
@@ -213,12 +227,14 @@ def refresh_all() -> None:
                    "import-manifest", "--manifest", str(p["tv_manifest"]), "--out", str(p["tv_index"])])
     if rc2 != 0:
         raise RuntimeError(f"TV index refresh failed (exit {rc2}).")
+    log_step(LOGGER, "refresh_all", starting=False)
 
 
 def build_unified_queue() -> None:
     """
     Reuse proven queue builders (Movies GUI then TV GUI).
     """
+    log_step(LOGGER, "build_unified_queue", starting=True)
     health_check()
     p = default_paths()
     py = sys.executable
@@ -245,6 +261,40 @@ def build_unified_queue() -> None:
             f"TV queue was not created: {p['tv_queue']}.\n"
             "In the TV queue window, click Save Queue."
         )
+    log_step(LOGGER, "build_unified_queue", starting=False)
+
+
+def run_movies_queue() -> int:
+    log_step(LOGGER, "run_movies_queue", starting=True)
+    health_check()
+    p = default_paths()
+    py = sys.executable
+
+    if not p["movies_queue"].exists():
+        raise FileNotFoundError(f"Movies queue missing: {p['movies_queue']}")
+
+    rc_movies = run_cmd([py, str(app_dir() / "discmapper_v02.py"), "--config", str(p["movies_config"]),
+                         "rip", "--queue", str(p["movies_queue"])])
+    log_step(LOGGER, "run_movies_queue", starting=False)
+    return rc_movies
+
+
+def run_tv_queue() -> int:
+    log_step(LOGGER, "run_tv_queue", starting=True)
+    health_check()
+    p = default_paths()
+    py = sys.executable
+
+    if not p["tv_queue"].exists():
+        raise FileNotFoundError(f"TV queue missing: {p['tv_queue']}")
+    if not p["tv_index"].exists():
+        raise FileNotFoundError(f"TV index missing: {p['tv_index']}")
+
+    rc_tv = run_cmd([py, str(app_dir() / "discmapper_tv_v02.py"),
+                     "rip-queue", "--index", str(p["tv_index"]), "--queue", str(p["tv_queue"]),
+                     "--config", str(p["tv_config"])])
+    log_step(LOGGER, "run_tv_queue", starting=False)
+    return rc_tv
 
 
 def run_unified_queue() -> int:
@@ -253,6 +303,7 @@ def run_unified_queue() -> int:
     - Movies first, then TV.
     - Non-zero from Movies does NOT prevent TV from running.
     """
+    log_step(LOGGER, "run_unified_queue", starting=True)
     health_check()
     p = default_paths()
     py = sys.executable
@@ -271,7 +322,9 @@ def run_unified_queue() -> int:
                      "--config", str(p["tv_config"])])
 
     if rc_movies != 0:
+        log_step(LOGGER, "run_unified_queue", starting=False)
         return rc_movies
+    log_step(LOGGER, "run_unified_queue", starting=False)
     return rc_tv
 
 
@@ -350,10 +403,36 @@ def gui() -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(prog="discmapper_unified_v03")
-    ap.add_argument("cmd", nargs="?", default="gui", choices=["gui", "health", "refresh-all", "build-queue", "run"])
+    ap.add_argument("cmd", nargs="?", default=None, choices=["gui", "health", "refresh-all", "build-queue", "run"])
+    ap.add_argument("--movies", action="store_true", help="Run movies mode without opening the interactive dashboard")
+    ap.add_argument("--tv", action="store_true", help="Run TV mode without opening the interactive dashboard")
+    ap.add_argument("--verbose", action="store_true", help="Print log messages to stdout in addition to writing run logs")
     args = ap.parse_args()
 
-    if args.cmd == "gui":
+    mode = "unified"
+    if args.movies and not args.tv:
+        mode = "movies"
+    elif args.tv and not args.movies:
+        mode = "tv"
+
+    p = default_paths()
+    if mode == "movies":
+        config_used = str(p["movies_config"])
+    elif mode == "tv":
+        config_used = str(p["tv_config"])
+    else:
+        config_used = f"{p['movies_config']}; {p['tv_config']}"
+
+    set_logger(init_run_logger("discmapper_unified_v03", mode=mode, config_used=config_used, verbose=args.verbose))
+
+    if args.movies or args.tv:
+        if args.movies and args.tv:
+            raise SystemExit(run_unified_queue())
+        if args.movies:
+            raise SystemExit(run_movies_queue())
+        raise SystemExit(run_tv_queue())
+
+    if args.cmd in (None, "gui"):
         gui()
     elif args.cmd == "health":
         health_check()
