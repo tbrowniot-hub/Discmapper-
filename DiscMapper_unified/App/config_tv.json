@@ -19,5 +19,20 @@
   "include_show_year_in_folder": true,
   "include_imdb_id_in_folder": true,
   "append_pkg_index_to_filename": true,
-  "write_sidecar_json": true
+  "write_sidecar_json": true,
+  "timing": {
+    "poll_interval_seconds": 3,
+    "disc_settle_seconds": 5,
+    "post_rip_settle_seconds": 3,
+    "eject_delay_seconds": 2,
+    "max_wait_minutes": 30
+  },
+  "policy": {
+    "keep_raw": true,
+    "keep_staging": true,
+    "cleanup_on_success": false,
+    "eject_on_success": true,
+    "eject_on_error": false,
+    "safe_commit": true
+  }
 }

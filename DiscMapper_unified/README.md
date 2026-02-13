@@ -84,3 +84,34 @@ python .\App\discmapper_unified_v03.py --movies --verbose
 ```
 
 Each run writes a log file to `Logs/run_YYYYMMDD_HHMMSS.log`.
+
+
+## Timing and policy controls
+
+Both `App/config.json` (movies) and `App/config_tv.json` (tv) now include:
+
+```json
+"timing": {
+  "poll_interval_seconds": 3,
+  "disc_settle_seconds": 5,
+  "post_rip_settle_seconds": 3,
+  "eject_delay_seconds": 2,
+  "max_wait_minutes": 30
+},
+"policy": {
+  "keep_raw": true,
+  "keep_staging": true,
+  "cleanup_on_success": false,
+  "eject_on_success": true,
+  "eject_on_error": false,
+  "safe_commit": true
+}
+```
+
+Movies ripping now runs a deterministic state machine (`WAIT_FOR_DISC` → `DISC_DETECTED` → `RIP` → `VERIFY_OUTPUTS` → `PLAN_RENAME` → `COMMIT_MOVES` → `EJECT`/`DONE`) and logs per-state enter/exit timestamps plus a run summary (wait/rip/verify/move timings, raw/eject decisions).
+
+For validation without hardware, run:
+
+```
+python .\App\discmapper_v02.py --config .\App\config.json rip --queue .\Data\Queues\queue.json --dry-run
+```

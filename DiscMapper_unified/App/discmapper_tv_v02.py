@@ -134,6 +134,22 @@ DEFAULT_CONFIG = {
 
     # Metadata
     "write_sidecar_json": True,
+
+    "timing": {
+        "poll_interval_seconds": 3,
+        "disc_settle_seconds": 5,
+        "post_rip_settle_seconds": 3,
+        "eject_delay_seconds": 2,
+        "max_wait_minutes": 30,
+    },
+    "policy": {
+        "keep_raw": True,
+        "keep_staging": True,
+        "cleanup_on_success": False,
+        "eject_on_success": True,
+        "eject_on_error": False,
+        "safe_commit": True,
+    },
 }
 
 def load_config(path: Path) -> Dict[str, Any]:
@@ -145,6 +161,8 @@ def load_config(path: Path) -> Dict[str, Any]:
         cfg = read_json(path) or {}
     merged = dict(DEFAULT_CONFIG)
     merged.update(cfg)
+    merged["timing"] = dict(DEFAULT_CONFIG.get("timing") or {}) | dict((cfg or {}).get("timing") or {})
+    merged["policy"] = dict(DEFAULT_CONFIG.get("policy") or {}) | dict((cfg or {}).get("policy") or {})
 
     root = path.resolve().parent.parent  # App/.. = install root
 
