@@ -1,0 +1,25 @@
+{
+  "raw_root": "Staging/Movies/1_Raw",
+  "done_root": "Staging/Movies/1_Raw/_done",
+  "ready_root": "Staging/Movies/3_Ready",
+  "workbench_review": "Staging/Movies/2_Review",
+  "workbench_unable": "Staging/Unable_to_Read",
+  "makemkv": {
+    "makemkvcon_path": "C:\\Program Files (x86)\\MakeMKV\\makemkvcon64.exe",
+    "drive_index": "auto",
+    "minlength_seconds": 2700
+  },
+  "eject": {
+    "enabled": true,
+    "drive_letter": ""
+  },
+  "min_main_minutes": 45,
+  "finish": {
+    "dedupe_duration_tolerance_seconds": 2,
+    "multi_cut_threshold_seconds": 180
+  },
+  "move_mode": "move",
+  "archive_raw_on_success": true,
+  "write_sidecar_json": true,
+  "append_pkg_index_to_name": true
+}
