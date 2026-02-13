@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from enum import Enum
 import json
 import re
 import shutil
@@ -95,7 +96,36 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "archive_raw_on_success": True,
     "append_pkg_index_to_name": True,
     "write_sidecar_json": True,
+
+    # Deterministic orchestration controls
+    "timing": {
+        "poll_interval_seconds": 3,
+        "disc_settle_seconds": 5,
+        "post_rip_settle_seconds": 3,
+        "eject_delay_seconds": 2,
+        "max_wait_minutes": 30,
+    },
+    "policy": {
+        "keep_raw": True,
+        "keep_staging": True,
+        "cleanup_on_success": False,
+        "eject_on_success": True,
+        "eject_on_error": False,
+        "safe_commit": True,
+    },
 }
+
+
+class RipState(str, Enum):
+    WAIT_FOR_DISC = "WAIT_FOR_DISC"
+    DISC_DETECTED = "DISC_DETECTED"
+    RIP = "RIP"
+    VERIFY_OUTPUTS = "VERIFY_OUTPUTS"
+    PLAN_RENAME = "PLAN_RENAME"
+    COMMIT_MOVES = "COMMIT_MOVES"
+    EJECT = "EJECT"
+    DONE = "DONE"
+    ERROR = "ERROR"
 
 def load_config(config_path: Optional[str]) -> Dict[str, Any]:
     """Load config.json and auto-migrate paths to the current install root."""
@@ -496,6 +526,61 @@ def eject_drive(letter: str) -> None:
     ps = f'(New-Object -comObject Shell.Application).NameSpace(17).ParseName("{letter}").InvokeVerb("Eject")'
     subprocess.run(["powershell","-NoProfile","-Command",ps], check=False)
 
+def load_timing_policy(config: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    timing_defaults = DEFAULT_CONFIG["timing"]
+    policy_defaults = DEFAULT_CONFIG["policy"]
+    timing = dict(timing_defaults) | dict(config.get("timing") or {})
+    policy = dict(policy_defaults) | dict(config.get("policy") or {})
+    return timing, policy
+
+
+def verify_disc_structure(drive_letter: str) -> bool:
+    if not drive_letter:
+        return False
+    root = Path(f"{drive_letter}:/")
+    return (root / "VIDEO_TS").exists() or (root / "BDMV").exists()
+
+
+def build_finish_plan(config: Dict[str, Any], job: Dict[str, Any], keeper_path: Path) -> Dict[str, Any]:
+    title = job["title"]
+    year = job.get("year")
+    imdb_id = job["imdb_id"]
+
+    safe_title = sanitize_name(title)
+    pkg_index = job.get("pkg_index")
+    if pkg_index is None:
+        pkg_index = job.get("index", job.get("idx"))
+    try:
+        pkg_index = int(pkg_index) if pkg_index is not None and str(pkg_index).strip() != "" else None
+    except Exception:
+        pkg_index = None
+
+    idx_tag = ""
+    if bool(config.get("append_pkg_index_to_name", True)) and pkg_index is not None:
+        idx_tag = f" [IDX{pkg_index}]"
+
+    if year:
+        folder_name = f"{safe_title} ({year}) {{imdb-{imdb_id}}}{idx_tag}"
+        file_name = f"{safe_title} ({year}) {{imdb-{imdb_id}}}{idx_tag}.mkv"
+    else:
+        folder_name = f"{safe_title} {{imdb-{imdb_id}}}{idx_tag}"
+        file_name = f"{safe_title} {{imdb-{imdb_id}}}{idx_tag}.mkv"
+
+    dest_dir = Path(config["ready_root"]) / folder_name
+    dest = dest_dir / file_name
+    if dest.exists():
+        stem, suf = dest.stem, dest.suffix
+        n = 1
+        while True:
+            cand = dest_dir / f"{stem} ({n}){suf}"
+            if not cand.exists():
+                dest = cand
+                break
+            n += 1
+
+    return {"source": str(keeper_path), "dest_dir": str(dest_dir), "dest": str(dest), "pkg_index": pkg_index}
+
+
 def run_cmd(cmd: List[str], log_path: Path) -> int:
     ensure_dir(log_path.parent)
     with log_path.open("w", encoding="utf-8", errors="replace") as f:
@@ -699,47 +784,10 @@ def finish_success(
     reason: str
 ) -> Dict[str, Any]:
     """Move/rename keeper into Ready and return receipt dict."""
-    title = job["title"]
-    year = job.get("year")
-    imdb_id = job["imdb_id"]
-
-    safe_title = sanitize_name(title)
-
-    # Append package index (from CLZ row number) when available
-    pkg_index = job.get("pkg_index")
-    if pkg_index is None:
-        pkg_index = job.get("index", job.get("idx"))
-    try:
-        pkg_index = int(pkg_index) if pkg_index is not None and str(pkg_index).strip() != "" else None
-    except Exception:
-        pkg_index = None
-
-    idx_tag = ""
-    if bool(config.get("append_pkg_index_to_name", True)) and pkg_index is not None:
-        idx_tag = f" [IDX{pkg_index}]"
-
-    if year:
-        folder_name = f"{safe_title} ({year}) {{imdb-{imdb_id}}}{idx_tag}"
-        file_name = f"{safe_title} ({year}) {{imdb-{imdb_id}}}{idx_tag}.mkv"
-    else:
-        folder_name = f"{safe_title} {{imdb-{imdb_id}}}{idx_tag}"
-        file_name = f"{safe_title} {{imdb-{imdb_id}}}{idx_tag}.mkv"
-
-    dest_dir = Path(config["ready_root"]) / folder_name
-    ensure_dir(dest_dir)
-    dest = dest_dir / file_name
-
-    if dest.exists():
-        stem, suf = dest.stem, dest.suffix
-        n = 1
-        while True:
-            cand = dest_dir / f"{stem} ({n}){suf}"
-            if not cand.exists():
-                dest = cand
-                break
-            n += 1
-
-    kp = Path(keeper_path)
+    plan = build_finish_plan(config, job, Path(keeper_path))
+    kp = Path(plan["source"])
+    dest = Path(plan["dest"])
+    ensure_dir(Path(plan["dest_dir"]))
     if str(config.get("move_mode","move")).lower() == "copy":
         ensure_dir(dest.parent)
         shutil.copy2(kp, dest)
@@ -750,10 +798,10 @@ def finish_success(
         sidecar = dest.with_name(dest.stem + ".discmapper.json")
         meta = {
             "type": "movie",
-            "title": title,
-            "year": year,
-            "imdb_id": imdb_id,
-            "pkg_index": pkg_index,
+            "title": job["title"],
+            "year": job.get("year"),
+            "imdb_id": job["imdb_id"],
+            "pkg_index": plan["pkg_index"],
             "barcode": job.get("barcode",""),
             "reason": reason,
             "candidates": candidates,
@@ -777,6 +825,7 @@ def finish_success(
 
 def cmd_rip(args: argparse.Namespace) -> None:
     config = load_config(args.config)
+    timing, policy = load_timing_policy(config)
 
     qpath = Path(args.queue)
     if not qpath.exists():
@@ -787,21 +836,23 @@ def cmd_rip(args: argparse.Namespace) -> None:
         print("[DiscMapper Movies] Queue is empty.")
         return
 
+    dry_run = bool(getattr(args, "dry_run", False))
+
     mk_cfg = (config.get("makemkv") or {})
     makemkv = find_makemkvcon(str(mk_cfg.get("makemkvcon_path") or ""))
-    if not makemkv:
+    if not makemkv and not dry_run:
         raise RuntimeError("MakeMKV CLI not found. Install MakeMKV and/or set makemkv.makemkvcon_path.")
 
     drive_index = str(mk_cfg.get("drive_index") or "auto").strip().lower()
     if drive_index in ("", "auto"):
-        drive_index = detect_drive_index(makemkv)
+        drive_index = detect_drive_index(makemkv) if makemkv else "0"
 
     minlength = int(mk_cfg.get("minlength_seconds", 2700))
 
     eject_cfg = (config.get("eject") or {})
     eject_enabled = bool(eject_cfg.get("enabled", True))
     drive_letter = str(eject_cfg.get("drive_letter") or "").strip()
-    if eject_enabled and not drive_letter:
+    if not drive_letter:
         drive_letter = get_optical_drive_letter() or ""
 
     raw_root = Path(config["raw_root"]); ensure_dir(raw_root)
@@ -810,19 +861,37 @@ def cmd_rip(args: argparse.Namespace) -> None:
     unable_root = Path(config["workbench_unable"]); ensure_dir(unable_root)
     min_main = int(float(config.get("min_main_minutes", 45)) * 60)
 
-    print(f"[DiscMapper Movies] MakeMKV: {makemkv}")
+    print(f"[DiscMapper Movies] MakeMKV: {makemkv or 'dry-run'}")
     print(f"[DiscMapper Movies] Drive index: {drive_index}")
-    print(f"[DiscMapper Movies] Auto-eject: {'ON' if eject_enabled else 'OFF'} ({drive_letter or 'auto-detect failed'})")
-    print(f"[DiscMapper Movies] Raw root: {raw_root}")
-    print(f"[DiscMapper Movies] Done root: {done_root}")
-    print(f"[DiscMapper Movies] Ready root: {config['ready_root']}")
-    print(f"[DiscMapper Movies] Review: {review_root}")
-    print(f"[DiscMapper Movies] Unable: {unable_root}\n")
+    print(f"[DiscMapper Movies] Dry-run: {'ON' if dry_run else 'OFF'}")
+    print(f"[DiscMapper Movies] Timing: {timing}")
+    print(f"[DiscMapper Movies] Policy: {policy}")
 
     total = len(items)
     append_idx = bool(config.get("append_pkg_index_to_name", True))
 
     for qpos, it in enumerate(items, start=1):
+        state_times: Dict[str, Dict[str, float]] = {}
+        state_order: List[str] = []
+        errored = False
+        verify_ok = False
+        commit_ok = False
+        ejected = False
+        wait_time = rip_time = verify_time = move_time = 0.0
+
+        def enter(state: RipState, **decisions: Any) -> None:
+            ts = time.time()
+            state_times[state.value] = {"entered_at": ts}
+            state_order.append(state.value)
+            print(f"[State] {state.value} ENTER {datetime.fromtimestamp(ts).isoformat()} decisions={decisions}")
+
+        def exit_state(state: RipState, **decisions: Any) -> None:
+            ts = time.time()
+            rec = state_times.get(state.value, {})
+            rec["exited_at"] = ts
+            state_times[state.value] = rec
+            print(f"[State] {state.value} EXIT  {datetime.fromtimestamp(ts).isoformat()} decisions={decisions}")
+
         title = it["title"]
         year = it.get("year")
         imdb = str(it["imdb_id"]).lower()
@@ -835,7 +904,6 @@ def cmd_rip(args: argparse.Namespace) -> None:
             pkg_index = None
 
         barcode = normalize_barcode(str(it.get("barcode") or it.get("Barcode") or ""))
-
         safe_title = sanitize_name(title)
         idx_tag = f" [IDX{pkg_index}]" if (append_idx and pkg_index is not None) else ""
         folder_name = f"{safe_title} ({year}) {{imdb-{imdb}}}{idx_tag}" if year else f"{safe_title} {{imdb-{imdb}}}{idx_tag}"
@@ -843,71 +911,144 @@ def cmd_rip(args: argparse.Namespace) -> None:
         ensure_dir(job_dir)
 
         atomic_write_json(job_dir / ".discmapper.job.json", {
-            "type": "movie",
-            "title": title,
-            "year": year,
-            "imdb_id": imdb,
-            "format": fmt,
-            "pkg_index": pkg_index,
-            "barcode": barcode,
-            "queue_pos": qpos,
-            "queue_total": total,
-            "created_at": now_ts(),
+            "type": "movie", "title": title, "year": year, "imdb_id": imdb,
+            "format": fmt, "pkg_index": pkg_index, "barcode": barcode,
+            "queue_pos": qpos, "queue_total": total, "created_at": now_ts(),
         })
 
         print(f"=== [{qpos}/{total}] NEXT DISC ===")
-        print(f"Movie: {title} ({year or '????'}) [{imdb}]  IDX: {pkg_index if pkg_index is not None else 'n/a'}  Format: {fmt}")
-        if barcode:
-            print(f"Barcode: {barcode}")
-        print("Waiting for disc... (Ctrl+C to stop)")
-        while not is_media_loaded():
-            time.sleep(1)
-
-        log = job_dir / f"makemkv_{now_ts()}.log"
-        cmd = [makemkv, "-r", f"--minlength={minlength}", "mkv", f"disc:{drive_index}", "all", str(job_dir)]
-        print(f"[DiscMapper Movies] Ripping... log: {log.name}")
-        rc = run_cmd(cmd, log)
-
-        if eject_enabled and drive_letter:
-            eject_drive(drive_letter)
-
-        if rc != 0:
-            atomic_write_json(job_dir / ".discmapper.receipt.json", {"status":"unable","reason":f"makemkv_error_rc_{rc}","completed_at":now_ts()})
-            print(f"[DiscMapper Movies] RIP ERROR (rc={rc}). Moving -> Unable_to_Read\n")
-            move_folder(job_dir, unable_root)
-            continue
+        print(f"Movie: {title} ({year or '????'}) [{imdb}] IDX: {pkg_index if pkg_index is not None else 'n/a'}")
 
         try:
-            res = pick_keeper_or_prompt(config, job_dir, min_main)
+            enter(RipState.WAIT_FOR_DISC, drive_letter=drive_letter, queue_pos=qpos)
+            wait_started = time.monotonic()
+            max_wait_s = int(float(timing.get("max_wait_minutes", 30)) * 60)
+            poll_s = max(1, int(timing.get("poll_interval_seconds", 3)))
+            while True:
+                if dry_run or is_media_loaded():
+                    break
+                if (time.monotonic() - wait_started) > max_wait_s:
+                    raise TimeoutError(f"Timed out waiting for disc after {max_wait_s}s")
+                time.sleep(poll_s)
+            wait_time = time.monotonic() - wait_started
+            exit_state(RipState.WAIT_FOR_DISC, waited_seconds=round(wait_time, 2))
+
+            enter(RipState.DISC_DETECTED, drive_letter=drive_letter)
+            if not dry_run:
+                time.sleep(max(0, int(timing.get("disc_settle_seconds", 5))))
+                if drive_letter and not verify_disc_structure(drive_letter):
+                    raise RuntimeError(f"Disc structure check failed on {drive_letter}: expected VIDEO_TS or BDMV")
+            exit_state(RipState.DISC_DETECTED, structure_ok=True)
+
+            enter(RipState.RIP, drive_index=drive_index)
+            rip_started = time.monotonic()
+            if dry_run:
+                fake = job_dir / "title_t00.mkv"
+                fake.write_bytes(b"discmapper-dry-run")
+                rc = 0
+            else:
+                log = job_dir / f"makemkv_{now_ts()}.log"
+                cmd = [makemkv, "-r", f"--minlength={minlength}", "mkv", f"disc:{drive_index}", "all", str(job_dir)]
+                print(f"[DiscMapper Movies] Ripping... log: {log.name}")
+                rc = run_cmd(cmd, log)
+            rip_time = time.monotonic() - rip_started
+            if rc != 0:
+                raise RuntimeError(f"makemkv_error_rc_{rc}")
+            if not dry_run:
+                time.sleep(max(0, int(timing.get("post_rip_settle_seconds", 3))))
+            exit_state(RipState.RIP, rip_seconds=round(rip_time, 2), rc=rc)
+
+            enter(RipState.VERIFY_OUTPUTS)
+            verify_started = time.monotonic()
+            mkvs = sorted([p for p in job_dir.rglob("*.mkv") if p.is_file()])
+            file_count = len(mkvs)
+            if file_count == 0:
+                raise RuntimeError("no_mkvs_produced")
+            if not all(p.stat().st_size > 0 for p in mkvs):
+                raise RuntimeError("mkv_zero_byte_file_detected")
+            verify_ok = True
+            verify_time = time.monotonic() - verify_started
+            exit_state(RipState.VERIFY_OUTPUTS, file_count=file_count, verify_seconds=round(verify_time, 2))
+
+            enter(RipState.PLAN_RENAME)
+            if dry_run:
+                keeper_res = {"status": "success", "keeper_path": str(mkvs[0]), "candidates": [], "reason": "dry_run"}
+            else:
+                keeper_res = pick_keeper_or_prompt(config, job_dir, min_main)
+            if keeper_res.get("status") != "success":
+                raise RuntimeError(f"review_required:{keeper_res.get('reason')}")
+            plan = build_finish_plan(config, {"title": title, "year": year, "imdb_id": imdb, "pkg_index": pkg_index, "barcode": barcode}, Path(keeper_res["keeper_path"]))
+            exit_state(RipState.PLAN_RENAME, source=plan["source"], dest=plan["dest"], title_count=file_count)
+
+            enter(RipState.COMMIT_MOVES)
+            move_started = time.monotonic()
+            src = Path(plan["source"])
+            dest = Path(plan["dest"])
+            ensure_dir(Path(plan["dest_dir"]))
+            if str(config.get("move_mode", "move")).lower() == "copy":
+                shutil.copy2(src, dest)
+            else:
+                safe_move(src, dest)
+            if policy.get("safe_commit", True):
+                if not dest.exists() or dest.stat().st_size <= 0:
+                    raise RuntimeError("commit_verification_failed")
+            commit_ok = True
+            move_time = time.monotonic() - move_started
+            receipt = {
+                "status": "success",
+                "reason": keeper_res.get("reason", ""),
+                "keeper_dest": str(dest),
+                "candidates": keeper_res.get("candidates", []),
+                "plan": plan,
+                "completed_at": now_ts(),
+            }
+            atomic_write_json(job_dir / ".discmapper.receipt.json", receipt)
+            exit_state(RipState.COMMIT_MOVES, move_seconds=round(move_time, 2), committed=True)
+
+            if bool(policy.get("cleanup_on_success", False)) and not bool(policy.get("keep_raw", True)):
+                src_dir = job_dir
+                if src_dir.exists():
+                    shutil.rmtree(src_dir, ignore_errors=True)
+            elif bool(config.get("archive_raw_on_success", True)) and not bool(policy.get("keep_raw", True)):
+                move_folder(job_dir, done_root)
+
+            should_eject = (eject_enabled and bool(policy.get("eject_on_success", True)) and verify_ok and commit_ok)
+            if should_eject and drive_letter:
+                enter(RipState.EJECT, drive_letter=drive_letter)
+                time.sleep(max(0, int(timing.get("eject_delay_seconds", 2))))
+                eject_drive(drive_letter)
+                ejected = True
+                exit_state(RipState.EJECT, ejected=True)
+
+            enter(RipState.DONE)
+            exit_state(RipState.DONE, title=title)
+
         except Exception as e:
-            res = {"status":"review","reason":f"finish_exception: {e!r}"}
+            errored = True
+            enter(RipState.ERROR, error=repr(e))
+            atomic_write_json(job_dir / ".discmapper.receipt.json", {"status": "unable", "reason": str(e), "completed_at": now_ts()})
+            if job_dir.exists() and not dry_run:
+                move_folder(job_dir, unable_root)
+            if eject_enabled and bool(policy.get("eject_on_error", False)) and drive_letter:
+                enter(RipState.EJECT, drive_letter=drive_letter)
+                time.sleep(max(0, int(timing.get("eject_delay_seconds", 2))))
+                eject_drive(drive_letter)
+                ejected = True
+                exit_state(RipState.EJECT, ejected=True, on_error=True)
+            exit_state(RipState.ERROR)
 
-        if res.get("status") != "success":
-            atomic_write_json(job_dir / ".discmapper.receipt.json", {
-                "status":"review",
-                "reason": res.get("reason"),
-                "candidates": res.get("candidates", []),
-                "completed_at": now_ts()
-            })
-            print(f"[DiscMapper Movies] REVIEW: {res.get('reason')}. Moving -> Movies Review\n")
-            move_folder(job_dir, review_root)
-            continue
-
-        receipt = finish_success(
-            config,
-            {"title":title,"year":year,"imdb_id":imdb,"pkg_index":pkg_index,"barcode":barcode},
-            job_dir,
-            res["keeper_path"],
-            res.get("candidates", []),
-            res.get("reason",""),
-        )
-        atomic_write_json(job_dir / ".discmapper.receipt.json", receipt)
-        print(f"[DiscMapper Movies] DONE: {receipt['keeper_dest']}\n")
-
-        if bool(config.get("archive_raw_on_success", True)):
-            move_folder(job_dir, done_root)
+        print("[DiscMapper Movies] Run summary:")
+        print(f"  disc wait time: {wait_time:.2f}s")
+        print(f"  rip time: {rip_time:.2f}s")
+        print(f"  verify time: {verify_time:.2f}s")
+        print(f"  rename/move time: {move_time:.2f}s")
+        print(f"  raw kept: {bool(policy.get('keep_raw', True))}")
+        print(f"  ejected: {ejected}")
+        print(f"  errored: {errored}")
+        print(f"  states: {' -> '.join(state_order)}")
 
     print("[DiscMapper Movies] Queue completed.")
+
 
 def main() -> None:
     ap = argparse.ArgumentParser(prog="discmapper_v02")
@@ -926,6 +1067,7 @@ def main() -> None:
 
     p3 = sp.add_parser("rip", help="Run ripping session from queue")
     p3.add_argument("--queue", default="queue.json")
+    p3.add_argument("--dry-run", action="store_true", help="Run state machine without requiring hardware")
     p3.set_defaults(func=cmd_rip)
 
     args = ap.parse_args()
